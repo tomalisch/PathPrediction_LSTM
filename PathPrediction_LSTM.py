@@ -19,12 +19,15 @@ from tqdm.auto import tqdm
 from tensorflow import keras
 from keras import Sequential
 from keras.layers import Dense, LSTM, Dropout
+from sklearn.preprocessing import MinMaxScaler
 
 # Loading training data
+a = hdf5storage.loadmat(os.getcwd()+'/'+'data.mat')
+
 
 # Shape training data array
 
-trainingData = pd.DataFrame(dataABM_Lior.reshape((108000*1000, -1)))
+trainingData = pd.DataFrame(data.reshape((108000*1000, -1)))
 trainingData = trainingData.iloc[:,0:2]
 trainingData.dropna()
 scaler = MinMaxScaler()
