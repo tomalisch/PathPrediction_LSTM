@@ -16,14 +16,17 @@ import datetime
 import hdf5storage
 from tqdm.auto import tqdm
 
-from tensorflow import keras
-from keras import Sequential
-from keras.layers import Dense, LSTM, Dropout
-from sklearn.preprocessing import MinMaxScaler
+import torch
+import torch.nn as nn
+import torch.functional as F
+from torch.optim import Adam
+from torch.utils.data import TensorDataset, DataLoader
 
-# Loading training data
-a = hdf5storage.loadmat(os.getcwd()+'/'+'data.mat')
+import lightning as L
 
+
+# Loading training data (specific syntax depends on input raw)
+data = hdf5storage.loadmat(os.getcwd()+'/'+'data.mat')['Turncell']
 
 # Shape training data array
 
@@ -33,27 +36,8 @@ trainingData.dropna()
 scaler = MinMaxScaler()
 trainingData = scaler.fit_transform(trainingData)
 trainingDataXY = trainingData[:,0:2]
-trainingDataXY = trainingDataXY.reshape((-1,30,2))
-trainingDataXY_Next = trainingData[0:len(trainingData[:,0]):30,0:2]
+trainingDataXY = trainingDataXY.reshape((-1,10,2))
+trainingDataXY_Next = trainingData[0:len(trainingData[:,0]):10,0:2]
 
-## Set up recurrent neural net
+## Set up recurrent neural net using Pytorch
 
-rnn = Sequential()
-
-# Input layer
-rnn.add(LSTM(units = 45, return_sequences = True, input_shape = (trainingDataXY.shape[1], 2)))
-rnn.add(Dropout(0.2))
-rnn.add(LSTM(units = 45, return_sequences = True))
-rnn.add(Dropout(0.2))
-rnn.add(LSTM(units = 45, return_sequences = True))
-rnn.add(Dropout(0.2))
-rnn.add(LSTM(units = 45))
-rnn.add(Dropout(0.2))
-
-# Output layer
-rnn.add(Dense(units = 2))
-
-
-opt = keras.optimizers.Adam(learning_rate=0.0001)
-rnn.compile(optimizer = opt, loss = 'mean_squared_error')
-rnn.fit(trainingDataXY, trainingDataXY_Next, epochs = 10, batch_size = 32)
