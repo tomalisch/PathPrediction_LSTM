@@ -25,25 +25,36 @@ from torch.utils.data import TensorDataset, DataLoader
 
 import lightning as L
 
+# Set past frame number from which to predict next coordinate
+timesteps = 10
+
 # Loading training data (specific syntax depends on input raw)
-data = hdf5storage.loadmat(os.getcwd()+'/'+'data.mat')['Turncell']
+data = hdf5storage.loadmat(os.getcwd()+'/'+'data.mat')['Centroidarray']
 
 # Shape training data array
-trainingData = pd.DataFrame(data.reshape((108000*1000, -1)))
-trainingData = trainingData.iloc[:,0:2]
-trainingData.dropna()
-trainingDataXY = trainingData[:,0:2]
-trainingDataXY = trainingDataXY.reshape((-1,10,2))
-trainingDataXY_Next = trainingData[0:len(trainingData[:,0]):10,0:2]
+trainingData = pd.DataFrame(data.transpose([2,0,1]).reshape(-1, 2))
+trainingData = trainingData.dropna()
+
+# Cull last values in array to allow reshaping according to timesteps set
+overflow = len(trainingData) % (timesteps+1)
+trainingData = trainingData.drop( trainingData.iloc[-overflow:,:].index, axis='index' )
+
+# Set up target training data (X, Y coordinates every ('timestep'+1)nth frame)
+trainingDataXY = np.array(trainingData).reshape((-1,timesteps+1,2))
+trainingDataXY_Next = trainingDataXY[:,timesteps,:].reshape(-1,1,2)
+# Remove target values from input training set
+trainingDataXY = np.delete(trainingDataXY, timesteps, axis=1)
+
+
 
 ## Set up recurrent neural net using Pytorch
 
 class PP_LSTM_manual(L.LightningModule):
     
     # Create and initialize weights and biases tensors
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(self):
         # superInit from Lightning to inherit log functions
-        super().__init__(*args, **kwargs)
+        super().__init__()
 
         # Set up tensors storing weights and bias means and stds
         mean = torch.tensor(0.0)
@@ -90,7 +101,7 @@ class PP_LSTM_manual(L.LightningModule):
 
 
     # Perform one step through entire (unrolled) LSTM
-    def fwd(self, input):
+    def forward(self, input):
 
         # Initialize long and short term memory
         longMemory = 0
@@ -105,22 +116,36 @@ class PP_LSTM_manual(L.LightningModule):
     
 
     # Function to configure Adam optimizer (e.g., if default LR is not optimal))
-    def configureOptimizers(self):
+    def configure_optimizers(self):
 
         # Keep Adam optimizer parameters default; change if learning insufficient
-        return Adam(self.parameters)
+        return Adam(self.parameters())
 
 
     # Perform one step of model training using batch data and its indices; calculate and log loss
-    def trainingStep(self, batch, batchIDs):
+    def training_step(self, batch, batchIDs):
 
         # Define input and targets based on batch data input
         input_i, target_i = batch
         # Forward through unrolled model, predicting outputs from inputs, weights, and biases
-        output_i = self.fwd(input_i[0])
+        output_i = self.forward(input_i[0])
         # Compute loss as mean squared difference between output and target
-        loss = (output_i - target_i)**2
+        loss = torch.mean((output_i - target_i)**2)
+        print(loss)
         # Use Lightning to log training loss
         self.log('train_loss', loss)
 
         return loss
+
+## Set up and train the model
+model = PP_LSTM_manual()
+
+# Set up input and output tensors, and wrap in DataLoader function
+inputs = torch.tensor(trainingDataXY)
+targets = torch.tensor(trainingDataXY_Next)
+dataset = TensorDataset(inputs, targets)
+dataloader = DataLoader(dataset)
+
+# Set up trainer (using Lightning)
+trainer = L.Trainer(max_epochs=10000)
+trainer.fit(model, train_dataloaders=dataloader)
