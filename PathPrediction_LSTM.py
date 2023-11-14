@@ -24,6 +24,7 @@ from torch.optim import Adam
 from torch.utils.data import TensorDataset, DataLoader
 
 import lightning as L
+from lightning.pytorch.callbacks import RichProgressBar
 
 # Set past frame number from which to predict next coordinate
 timesteps = 10
@@ -131,7 +132,6 @@ class PP_LSTM_manual(L.LightningModule):
         output_i = self.forward(input_i[0])
         # Compute loss as mean squared difference between output and target
         loss = torch.mean((output_i - target_i)**2)
-        print(loss)
         # Use Lightning to log training loss
         self.log('train_loss', loss)
 
@@ -147,5 +147,17 @@ dataset = TensorDataset(inputs, targets)
 dataloader = DataLoader(dataset)
 
 # Set up trainer (using Lightning)
-trainer = L.Trainer(max_epochs=10000)
+trainer = L.Trainer(max_epochs=1, enable_model_summary=True, callbacks=[RichProgressBar()])
 trainer.fit(model, train_dataloaders=dataloader)
+
+# Check model output
+print( model( torch.tensor( [[16.271627, 28.229027],
+       [15.893902, 28.364021],
+       [15.524648, 28.632938],
+       [15.184661, 28.88007 ],
+       [14.943663, 28.832201],
+       [14.151804, 29.382717],
+       [14.068769, 29.366947],
+       [13.594865, 29.508871],
+       [13.239436, 29.688492],
+       [12.843507, 29.885359]] ) ).detach() )
