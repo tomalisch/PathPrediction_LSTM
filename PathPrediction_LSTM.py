@@ -47,8 +47,7 @@ trainingDataXY_Next = trainingDataXY[:,timesteps,:].reshape(-1,1,2)
 trainingDataXY = np.delete(trainingDataXY, timesteps, axis=1)
 
 
-
-## Set up recurrent neural net using Pytorch
+## Manually Set up recurrent neural net using Pytorchs
 
 class PP_LSTM_manual(L.LightningModule):
     
@@ -144,10 +143,10 @@ model = PP_LSTM_manual()
 inputs = torch.tensor(trainingDataXY)
 targets = torch.tensor(trainingDataXY_Next)
 dataset = TensorDataset(inputs, targets)
-dataloader = DataLoader(dataset)
+dataloader = DataLoader(dataset, num_workers=15)
 
 # Set up trainer (using Lightning)
-trainer = L.Trainer(max_epochs=1, enable_model_summary=True, callbacks=[RichProgressBar()])
+trainer = L.Trainer(max_epochs=100, enable_model_summary=True, callbacks=[RichProgressBar()])
 trainer.fit(model, train_dataloaders=dataloader)
 
 # Check model output
