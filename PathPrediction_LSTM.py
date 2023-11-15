@@ -4,6 +4,7 @@
 import os
 import math
 from typing import Any
+from lightning.pytorch.utilities.types import OptimizerLRScheduler
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.path import Path
@@ -48,8 +49,7 @@ trainingDataXY_Next = trainingDataXY[:,timesteps,:].reshape(-1,1,2)
 trainingDataXY = np.delete(trainingDataXY, timesteps, axis=1)
 
 
-## Manually Set up recurrent neural net using Pytorchs
-
+## Manually set up recurrent neural net using Pytorchs
 class PP_LSTM_manual(L.LightningModule):
     
     # Create and initialize weights and biases tensors
@@ -139,21 +139,76 @@ class PP_LSTM_manual(L.LightningModule):
 
         return loss
 
-## Set up and train the model
-model = PP_LSTM_manual()
-
-# Set up input and output tensors, and wrap in DataLoader function
+## Set up input and output tensors, and wrap in DataLoader function
 inputs = torch.tensor(trainingDataXY)
 targets = torch.tensor(trainingDataXY_Next)
 dataset = TensorDataset(inputs, targets)
 dataloader = DataLoader(dataset)
 
-# Set up trainer (using Lightning)
-trainer = L.Trainer(max_epochs=100, enable_model_summary=True, callbacks=[RichProgressBar()], default_root_dir=dirLSTM)
-trainer.fit(model, train_dataloaders=dataloader)
 
-# Check model output
-print( model( torch.tensor( [[16.271627, 28.229027],
+## Set up and train the manual model
+modelManual = PP_LSTM_manual()
+
+# Set up manual trainer (still using Lightning)
+trainerManual = L.Trainer(max_epochs=100, log_every_n_steps=1, enable_model_summary=True, callbacks=[RichProgressBar()], default_root_dir=dirLSTM)
+trainerManual.fit(modelManual, train_dataloaders=dataloader)
+
+# Check model output with random input
+print( modelManual( torch.tensor( [[16.271627, 28.229027],
+       [15.893902, 28.364021],
+       [15.524648, 28.632938],
+       [15.184661, 28.88007 ],
+       [14.943663, 28.832201],
+       [14.151804, 29.382717],
+       [14.068769, 29.366947],
+       [13.594865, 29.508871],
+       [13.239436, 29.688492],
+       [12.843507, 29.885359]] ) ).detach() )
+
+
+## Set up and train PyTorch model with inbuilt Lightning functions
+class PP_LSTM_Lightning(L.LightningModule):
+
+    def __init__(self):
+        super().__init__()
+
+        # Input and output parameters are X and Y coordinates
+        self.lstm=nn.LSTM(input_size=2, hidden_size=2)
+
+    def forward(self, input):
+        lstm_out, temp = self.lstm(input)
+
+        # Prediction is the last unrolled lstm unit output of the model (short term memory value)
+        prediction = lstm_out[-1]
+        return prediction
+    
+    def configure_optimizers(self, lr=0.001):
+
+        return Adam(self.parameters(), lr=lr)
+    
+    # Perform one step of model training using batch data and its indices; calculate and log loss
+    def training_step(self, batch, batchIDs):
+
+        # Define input and targets based on batch data input
+        input_i, target_i = batch
+        # Forward through unrolled model, predicting outputs from inputs, weights, and biases
+        output_i = self.forward(input_i[0])
+        # Compute loss as mean squared difference between output and target
+        loss = torch.mean((output_i - target_i)**2)
+        # Use Lightning to log training loss
+        self.log('train_loss', loss)
+
+        return loss
+
+## Set up and train the Lightning model
+modelLightning = PP_LSTM_Lightning()
+
+# Set up Lightning trainer
+trainerLightning = L.Trainer(max_epochs=100, log_every_n_steps=1)
+trainerLightning.fit(model=modelLightning, train_dataloaders=dataloader)
+
+# Check model output with random input
+print( modelManual( torch.tensor( [[16.271627, 28.229027],
        [15.893902, 28.364021],
        [15.524648, 28.632938],
        [15.184661, 28.88007 ],
