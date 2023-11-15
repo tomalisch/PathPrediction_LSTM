@@ -29,8 +29,9 @@ from lightning.pytorch.callbacks import RichProgressBar
 # Set past frame number from which to predict next coordinate
 timesteps = 10
 
-# Loading training data (specific syntax depends on input raw)
-data = hdf5storage.loadmat(os.getcwd()+'/'+'data.mat')['Centroidarray']
+# Get and store current path and load training data (specific syntax depends on input raw)
+dirLSTM = os.getcwd()+'/'
+data = hdf5storage.loadmat(dirLSTM+'data.mat')['Centroidarray']
 
 # Shape training data array
 trainingData = pd.DataFrame(data.transpose([2,0,1]).reshape(-1, 2))
@@ -55,6 +56,8 @@ class PP_LSTM_manual(L.LightningModule):
     def __init__(self):
         # superInit from Lightning to inherit log functions
         super().__init__()
+        # Save hyperparameters in checkpoints
+        self.save_hyperparameters()
 
         # Set up tensors storing weights and bias means and stds
         mean = torch.tensor(0.0)
@@ -143,10 +146,10 @@ model = PP_LSTM_manual()
 inputs = torch.tensor(trainingDataXY)
 targets = torch.tensor(trainingDataXY_Next)
 dataset = TensorDataset(inputs, targets)
-dataloader = DataLoader(dataset, num_workers=15)
+dataloader = DataLoader(dataset, num_workers=15, persistent_workers=True)
 
 # Set up trainer (using Lightning)
-trainer = L.Trainer(max_epochs=100, enable_model_summary=True, callbacks=[RichProgressBar()])
+trainer = L.Trainer(max_epochs=100, enable_model_summary=True, callbacks=[RichProgressBar()], default_root_dir=dirLSTM)
 trainer.fit(model, train_dataloaders=dataloader)
 
 # Check model output
