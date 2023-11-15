@@ -48,6 +48,12 @@ trainingDataXY_Next = trainingDataXY[:,timesteps,:].reshape(-1,1,2)
 # Remove target values from input training set
 trainingDataXY = np.delete(trainingDataXY, timesteps, axis=1)
 
+## Set up input and output tensors, and wrap in DataLoader function
+inputs = torch.tensor(trainingDataXY)
+targets = torch.tensor(trainingDataXY_Next)
+dataset = TensorDataset(inputs, targets)
+dataloader = DataLoader(dataset)
+
 
 ## Manually set up recurrent neural net using Pytorchs
 class PP_LSTM_manual(L.LightningModule):
@@ -139,13 +145,6 @@ class PP_LSTM_manual(L.LightningModule):
 
         return loss
 
-## Set up input and output tensors, and wrap in DataLoader function
-inputs = torch.tensor(trainingDataXY)
-targets = torch.tensor(trainingDataXY_Next)
-dataset = TensorDataset(inputs, targets)
-dataloader = DataLoader(dataset)
-
-
 ## Set up and train the manual model
 modelManual = PP_LSTM_manual()
 
@@ -173,7 +172,7 @@ class PP_LSTM_Lightning(L.LightningModule):
         super().__init__()
 
         # Input and output parameters are X and Y coordinates
-        self.lstm=nn.LSTM(input_size=2, hidden_size=2)
+        self.lstm=nn.LSTM(input_size=2, hidden_size=2, batch_first=True)
 
     def forward(self, input):
         lstm_out, temp = self.lstm(input)
@@ -208,7 +207,7 @@ trainerLightning = L.Trainer(max_epochs=100, log_every_n_steps=1)
 trainerLightning.fit(model=modelLightning, train_dataloaders=dataloader)
 
 # Check model output with random input
-print( modelManual( torch.tensor( [[16.271627, 28.229027],
+print( modelLightning( torch.tensor( [[16.271627, 28.229027],
        [15.893902, 28.364021],
        [15.524648, 28.632938],
        [15.184661, 28.88007 ],
