@@ -212,7 +212,7 @@ trainerLightning = L.Trainer(max_epochs=100, log_every_n_steps=1)
 trainerLightning.fit(model=modelLightning, train_dataloaders=dataloader)
 
 # Check model output with random input
-print( modelLightning( torch.tensor( scaler.transform([[16.271627, 28.229027],
+print( scaler.inverse_transform( modelLightning( torch.tensor(scaler.transform( [[16.271627, 28.229027],
        [15.893902, 28.364021],
        [15.524648, 28.632938],
        [15.184661, 28.88007 ],
@@ -221,4 +221,4 @@ print( modelLightning( torch.tensor( scaler.transform([[16.271627, 28.229027],
        [14.068769, 29.366947],
        [13.594865, 29.508871],
        [13.239436, 29.688492],
-       [12.843507, 29.885359]]) ) ).detach() )
+       [12.843507, 29.885359]] )) ) ).detach() )
