@@ -146,7 +146,7 @@ model = PP_LSTM_manual()
 inputs = torch.tensor(trainingDataXY)
 targets = torch.tensor(trainingDataXY_Next)
 dataset = TensorDataset(inputs, targets)
-dataloader = DataLoader(dataset, num_workers=15, persistent_workers=True)
+dataloader = DataLoader(dataset)
 
 # Set up trainer (using Lightning)
 trainer = L.Trainer(max_epochs=100, enable_model_summary=True, callbacks=[RichProgressBar()], default_root_dir=dirLSTM)
