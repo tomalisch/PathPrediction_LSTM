@@ -23,6 +23,7 @@ import torch.nn as nn
 import torch.functional as F
 from torch.optim import Adam
 from torch.utils.data import TensorDataset, DataLoader
+from sklearn.preprocessing import MinMaxScaler
 
 import lightning as L
 from lightning.pytorch.callbacks import RichProgressBar
@@ -34,9 +35,13 @@ timesteps = 10
 dirLSTM = os.getcwd()+'/'
 data = hdf5storage.loadmat(dirLSTM+'data.mat')['Centroidarray']
 
-# Shape training data array
+# Shape training data array and drop NaNs
 trainingData = pd.DataFrame(data.transpose([2,0,1]).reshape(-1, 2))
 trainingData = trainingData.dropna()
+
+# Scale coordinates independently to be between 0 and 1
+scaler = MinMaxScaler(feature_range=(0, 1))
+trainingData = pd.DataFrame( scaler.fit_transform(trainingData) )
 
 # Cull last values in array to allow reshaping according to timesteps set
 overflow = len(trainingData) % (timesteps+1)
@@ -172,7 +177,7 @@ class PP_LSTM_Lightning(L.LightningModule):
         super().__init__()
 
         # Input and output parameters are X and Y coordinates
-        self.lstm=nn.LSTM(input_size=2, hidden_size=2, batch_first=True)
+        self.lstm=nn.LSTM(input_size=2, hidden_size=2, batch_first=True, dropout=0.1)
 
     def forward(self, input):
         lstm_out, temp = self.lstm(input)
@@ -207,7 +212,7 @@ trainerLightning = L.Trainer(max_epochs=100, log_every_n_steps=1)
 trainerLightning.fit(model=modelLightning, train_dataloaders=dataloader)
 
 # Check model output with random input
-print( modelLightning( torch.tensor( [[16.271627, 28.229027],
+print( modelLightning( torch.tensor( scaler.transform([[16.271627, 28.229027],
        [15.893902, 28.364021],
        [15.524648, 28.632938],
        [15.184661, 28.88007 ],
@@ -216,4 +221,4 @@ print( modelLightning( torch.tensor( [[16.271627, 28.229027],
        [14.068769, 29.366947],
        [13.594865, 29.508871],
        [13.239436, 29.688492],
-       [12.843507, 29.885359]] ) ).detach() )
+       [12.843507, 29.885359]]) ) ).detach() )
