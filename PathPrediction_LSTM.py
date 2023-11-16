@@ -157,7 +157,7 @@ class PP_LSTM_Lightning(L.LightningModule):
         super().__init__()
 
         # Input and output parameters are X and Y coordinates
-        self.lstm=nn.LSTM(input_size=2, hidden_size=2, batch_first=True, dropout=0.1)
+        self.lstm=nn.LSTM(input_size=2, hidden_size=2, batch_first=True, dropout=0.0)
 
     def forward(self, input):
         lstm_out, temp = self.lstm(input)
