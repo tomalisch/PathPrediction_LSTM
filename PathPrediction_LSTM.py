@@ -188,7 +188,7 @@ class PP_LSTM_Lightning(L.LightningModule):
 modelLightning = PP_LSTM_Lightning()
 
 # Set up Lightning trainer
-trainerLightning = L.Trainer(max_epochs=100, log_every_n_steps=1)
+trainerLightning = L.Trainer(max_epochs=100, log_every_n_steps=1, accelerator='gpu', devices='auto', strategy='auto')
 trainerLightning.fit(model=modelLightning, train_dataloaders=dataloader)
 
 # Check model output with random input
