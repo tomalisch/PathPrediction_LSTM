@@ -150,26 +150,6 @@ class PP_LSTM_manual(L.LightningModule):
 
         return loss
 
-## Set up and train the manual model
-modelManual = PP_LSTM_manual()
-
-# Set up manual trainer (still using Lightning)
-trainerManual = L.Trainer(max_epochs=100, log_every_n_steps=1, enable_model_summary=True, callbacks=[RichProgressBar()], default_root_dir=dirLSTM)
-trainerManual.fit(modelManual, train_dataloaders=dataloader)
-
-# Check model output with random input
-print( modelManual( torch.tensor( [[16.271627, 28.229027],
-       [15.893902, 28.364021],
-       [15.524648, 28.632938],
-       [15.184661, 28.88007 ],
-       [14.943663, 28.832201],
-       [14.151804, 29.382717],
-       [14.068769, 29.366947],
-       [13.594865, 29.508871],
-       [13.239436, 29.688492],
-       [12.843507, 29.885359]] ) ).detach() )
-
-
 ## Set up and train PyTorch model with inbuilt Lightning functions
 class PP_LSTM_Lightning(L.LightningModule):
 
