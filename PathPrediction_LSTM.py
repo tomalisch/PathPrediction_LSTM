@@ -161,7 +161,7 @@ class PP_LSTM_Lightning(L.LightningModule):
 
     def forward(self, input):
         lstm_out, temp = self.lstm(input)
-
+  
         # Prediction is the last unrolled lstm unit output of the model (short term memory value)
         prediction = lstm_out[-1]
         return prediction
@@ -189,7 +189,7 @@ modelLightning = PP_LSTM_Lightning()
 
 # Set up Lightning trainer
 trainerLightning = L.Trainer(max_epochs=100, log_every_n_steps=1, accelerator='gpu', devices='auto', strategy='auto')
-trainerLightning.fit(model=modelLightning, train_dataloaders=dataloader)
+trainerLightning.fit(model=modelLightning, train_dataloaders=dataloader, ckpt_path=dirLSTM + 'lightning_logs/version_49/checkpoints/epoch=8-step=23670792.ckpt')
 
 # Check model output with random input
 print( scaler.inverse_transform( modelLightning( torch.tensor(scaler.transform( [[16.271627, 28.229027],
