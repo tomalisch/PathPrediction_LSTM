@@ -50,7 +50,7 @@ trainingData = trainingData.drop( trainingData.iloc[-overflow:,:].index, axis='i
 # Set up target training data (X, Y coordinates every ('timestep'+1)nth frame)
 trainingDataXY = np.array(trainingData).reshape((-1,timesteps+1,2))
 trainingDataXY_Next = trainingDataXY[:,timesteps,:].reshape(-1,1,2)
-# Remove target values from input training set
+# Remove target values from input training set 
 trainingDataXY = np.delete(trainingDataXY, timesteps, axis=1)
 
 ## Set up input and output tensors, and wrap in DataLoader function
@@ -157,6 +157,7 @@ class PP_LSTM_Lightning(L.LightningModule):
         super().__init__()
 
         # Input and output parameters are X and Y coordinates
+        # Single layer for now, expand to check if it increases performance
         self.lstm=nn.LSTM(input_size=2, hidden_size=2, batch_first=True, dropout=0.0)
 
     def forward(self, input):
@@ -189,10 +190,10 @@ modelLightning = PP_LSTM_Lightning()
 
 # Set up Lightning trainer
 trainerLightning = L.Trainer(max_epochs=100, log_every_n_steps=1, accelerator='gpu', devices='auto', strategy='auto')
-trainerLightning.fit(model=modelLightning, train_dataloaders=dataloader, ckpt_path=dirLSTM + 'lightning_logs/version_49/checkpoints/epoch=8-step=23670792.ckpt')
+trainerLightning.fit(model=modelLightning, train_dataloaders=dataloader)
 
-# Check model output with random input
-print( scaler.inverse_transform( modelLightning( torch.tensor(scaler.transform( [[16.271627, 28.229027],
+# Check model output with random input once
+testCoords = torch.tensor( scaler.transform( [[16.271627, 28.229027],
        [15.893902, 28.364021],
        [15.524648, 28.632938],
        [15.184661, 28.88007 ],
@@ -201,4 +202,45 @@ print( scaler.inverse_transform( modelLightning( torch.tensor(scaler.transform( 
        [14.068769, 29.366947],
        [13.594865, 29.508871],
        [13.239436, 29.688492],
-       [12.843507, 29.885359]] )) ) ).detach() )
+       [12.843507, 29.885359]] ).astype(np.float32) ).to(torch.device("mps"))
+
+predCoords = modelLightning(testCoords[:-1,:])
+predCoords = scaler.inverse_transform( predCoords.cpu().detach().reshape([1,-1]) )
+testCoordsCPU = scaler.inverse_transform( testCoords.cpu().detach() )
+plt.scatter(testCoordsCPU[:-1,0], testCoordsCPU[:-1,1])
+plt.scatter(predCoords[0, 0], predCoords[0, 1])
+plt.scatter(testCoordsCPU[-1, 0], testCoordsCPU[-1, 1])
+
+# Generate simulated tracks based on starting input frames
+# Moving window of f frames, predict next frame, move predicted frame into f-frame long window, repeat
+
+# How many minutes of tracks to generate (note training data was 30fps)
+lengthMin = 60
+
+# Starting coordinates of f frames
+startCoords = torch.tensor( scaler.transform( [[16.271627, 28.229027],
+       [15.893902, 28.364021],
+       [15.524648, 28.632938],
+       [15.184661, 28.88007 ],
+       [14.943663, 28.832201],
+       [14.151804, 29.382717],
+       [14.068769, 29.366947],
+       [13.594865, 29.508871],
+       [13.239436, 29.688492],
+       [12.843507, 29.885359]] ).astype(np.float32) ).to(torch.device("mps"))
+
+simulatedTracks = np.zeros([30 * 60 * lengthMin, 2])
+movingWindow = startCoords
+
+# Main loop
+for frame in range(len(simulatedTracks[:,0])):
+    # Predict next coordinates from current moving window
+    predCoords = modelLightning(movingWindow)
+    # Log inverse transformed predicted coordinate for later plotting
+    simulatedTracks[frame, :] = scaler.inverse_transform( predCoords.cpu().detach().reshape([1,-1]) )
+    # Adjust moving window for next frame, roll elements backwards first, then replace last (rolled first) element with new predicted value
+    movingWindow = movingWindow.roll(-1,0)
+    movingWindow[-1,:] = predCoords
+
+# Plot generated tracks
+plt.scatter( simulatedTracks[:,0], simulatedTracks[:,1] )
