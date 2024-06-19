@@ -7,6 +7,7 @@ from typing import Any
 from lightning.pytorch.utilities.types import OptimizerLRScheduler
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 from matplotlib.path import Path
 import matplotlib as mpl
 import seaborn as sns
@@ -23,7 +24,10 @@ import torch.nn as nn
 import torch.functional as F
 from torch.optim import Adam
 from torch.utils.data import TensorDataset, DataLoader
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+
+from keras.models import Sequential
+from keras.layers import LSTM, Dense, Dropout
 
 import lightning as L
 from lightning.pytorch.callbacks import RichProgressBar
@@ -150,7 +154,7 @@ class PP_LSTM_manual(L.LightningModule):
 
         return loss
 
-## Set up and train PyTorch model with inbuilt Lightning functions
+## Alternative 1: Set up and train PyTorch model with inbuilt Lightning functions
 class PP_LSTM_Lightning(L.LightningModule):
 
     def __init__(self):
@@ -185,11 +189,22 @@ class PP_LSTM_Lightning(L.LightningModule):
 
         return loss
 
+## Alternative 2: Set up a stacked keras LSTM layer by layer
+modelKeras = Sequential()
+modelKeras.add(LSTM(64, activation='relu', input_shape=(trainingDataXY.shape[1], trainingDataXY.shape[2]), return_sequences='True'))
+modelKeras.add(LSTM(32, activation='relu', return_sequences='False'))
+modelKeras.add(Dropout(0.2))
+modelKeras.add(Dense(trainingDataXY_Next.shape[2]))
+modelKeras.compile(optimizer='adam', loss='mse')
+modelKeras.summary()
+# Fit keras model
+history = modelKeras.fit( trainingDataXY, trainingDataXY_Next, epochs=10, batch_size=16, validation_split=0.1, verbose=1 )
+
 ## Set up and train the Lightning model
 modelLightning = PP_LSTM_Lightning()
 
 # Set up Lightning trainer
-trainerLightning = L.Trainer(max_epochs=100, log_every_n_steps=1, accelerator='gpu', devices='auto', strategy='auto')
+trainerLightning = L.Trainer(max_epochs=10, log_every_n_steps=1, accelerator='gpu', devices='auto', strategy='auto')
 trainerLightning.fit(model=modelLightning, train_dataloaders=dataloader)
 
 # Check model output with random input once
