@@ -192,13 +192,14 @@ class PP_LSTM_Lightning(L.LightningModule):
 ## Alternative 2: Set up a stacked keras LSTM layer by layer
 modelKeras = Sequential()
 modelKeras.add(LSTM(64, activation='relu', input_shape=(trainingDataXY.shape[1], trainingDataXY.shape[2]), return_sequences='True'))
-modelKeras.add(LSTM(32, activation='relu', return_sequences='False'))
+modelKeras.add(LSTM(32, activation='relu'))
 modelKeras.add(Dropout(0.2))
+# Check dense layer output & shape
 modelKeras.add(Dense(trainingDataXY_Next.shape[2]))
 modelKeras.compile(optimizer='adam', loss='mse')
 modelKeras.summary()
 # Fit keras model
-history = modelKeras.fit( trainingDataXY, trainingDataXY_Next, epochs=10, batch_size=16, validation_split=0.1, verbose=1 )
+history = modelKeras.fit( trainingDataXY, trainingDataXY_Next, epochs=10, batch_size=16, validation_split=0.2, verbose=1 )
 
 ## Set up and train the Lightning model
 modelLightning = PP_LSTM_Lightning()
