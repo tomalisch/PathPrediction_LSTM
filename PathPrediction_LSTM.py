@@ -191,15 +191,34 @@ class PP_LSTM_Lightning(L.LightningModule):
 
 ## Alternative 2: Set up a stacked keras LSTM layer by layer
 modelKeras = Sequential()
-modelKeras.add(LSTM(64, activation='relu', input_shape=(trainingDataXY.shape[1], trainingDataXY.shape[2]), return_sequences='True'))
-modelKeras.add(LSTM(32, activation='relu'))
+modelKeras.add(LSTM(128, input_shape=(trainingDataXY.shape[1], trainingDataXY.shape[2]), return_sequences='True'))
+modelKeras.add(LSTM(64, return_sequences='True'))
+modelKeras.add(LSTM(32, return_sequences='True'))
+modelKeras.add(LSTM(16))
 modelKeras.add(Dropout(0.2))
+# Add dropout layer after LSTM layers (but cf. Cheng et al., 2017 who propose per frame masks)
 # Check dense layer output & shape
-modelKeras.add(Dense(trainingDataXY_Next.shape[2]))
+modelKeras.add(Dense(trainingDataXY_Next.shape[2], activation='relu'))
 modelKeras.compile(optimizer='adam', loss='mse')
 modelKeras.summary()
 # Fit keras model
-history = modelKeras.fit( trainingDataXY, trainingDataXY_Next, epochs=10, batch_size=16, validation_split=0.2, verbose=1 )
+history = modelKeras.fit( trainingDataXY, trainingDataXY_Next, epochs=10, batch_size=64, validation_split=0.3, verbose=1 )
+# Plot training vs validation loss to check for overfitting
+plt.plot(history.history['loss'])
+plt.plot(history.history['val_loss'])
+plt.legend(['training loss', 'validation loss'])
+## Test Keras model
+testCoords = trainingDataXY[random.randint(0,len(trainingDataXY[:,0,0])),:,:]
+predCoords = modelKeras.predict(testCoords[:-1,:].reshape((1,len(testCoords[:,0])-1,2)))
+predCoords = scaler.inverse_transform( predCoords )
+testCoords = scaler.inverse_transform( testCoords )
+trueCoords = testCoords[-1,:] 
+plt.scatter(testCoords[:,0], testCoords[:,1])
+plt.scatter(trueCoords[0], trueCoords[1])
+plt.scatter(predCoords[0, 0], predCoords[0, 1])
+plt.legend(['base', 'true', 'predicted'])
+
+
 
 ## Set up and train the Lightning model
 modelLightning = PP_LSTM_Lightning()
