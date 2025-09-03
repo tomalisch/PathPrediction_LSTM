@@ -187,16 +187,16 @@ class PP_LSTM_Lightning(L.LightningModule):
 ## Set up and train the Lightning model
 modelLightning = PP_LSTM_Lightning()
 
-# Set up Lightning trainer
-trainerLightning = L.Trainer(max_epochs=100, log_every_n_steps=1, accelerator='gpu', devices='auto', strategy='auto')
-trainerLightning.fit(model=modelLightning, train_dataloaders=dataloader, ckpt_path=dirLSTM + 'lightning_logs/version_49/checkpoints/epoch=8-step=23670792.ckpt')
+# Set up Lightning trainer with 6 epochs (3x params)
+trainerLightning = L.Trainer(max_epochs=6, log_every_n_steps=1, accelerator='gpu', devices='auto', strategy='auto')
+trainerLightning.fit(model=modelLightning, train_dataloaders=dataloader, ckpt_path=dirLSTM + 'lightning_logs/version_52/checkpoints/epoch=25-step=68382288.ckpt')
 
 # Check model output with random input
-print( scaler.inverse_transform( modelLightning( torch.tensor(scaler.transform( [[16.271627, 28.229027],
+print( scaler.inverse_transform( modelLightning( torch.te nsor(scaler.transform( [[16.271627, 28.229027],
        [15.893902, 28.364021],
        [15.524648, 28.632938],
        [15.184661, 28.88007 ],
-       [14.943663, 28.832201],
+       [14.943663, 28.832201], 
        [14.151804, 29.382717],
        [14.068769, 29.366947],
        [13.594865, 29.508871],
