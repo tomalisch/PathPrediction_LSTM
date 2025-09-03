@@ -7,6 +7,7 @@ from typing import Any
 from lightning.pytorch.utilities.types import OptimizerLRScheduler
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 from matplotlib.path import Path
 import matplotlib as mpl
 import seaborn as sns
@@ -23,7 +24,10 @@ import torch.nn as nn
 import torch.functional as F
 from torch.optim import Adam
 from torch.utils.data import TensorDataset, DataLoader
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+
+from keras.models import Sequential
+from keras.layers import LSTM, Dense, Dropout
 
 import lightning as L
 from lightning.pytorch.callbacks import RichProgressBar
@@ -50,7 +54,7 @@ trainingData = trainingData.drop( trainingData.iloc[-overflow:,:].index, axis='i
 # Set up target training data (X, Y coordinates every ('timestep'+1)nth frame)
 trainingDataXY = np.array(trainingData).reshape((-1,timesteps+1,2))
 trainingDataXY_Next = trainingDataXY[:,timesteps,:].reshape(-1,1,2)
-# Remove target values from input training set
+# Remove target values from input training set 
 trainingDataXY = np.delete(trainingDataXY, timesteps, axis=1)
 
 ## Set up input and output tensors, and wrap in DataLoader function
@@ -150,13 +154,14 @@ class PP_LSTM_manual(L.LightningModule):
 
         return loss
 
-## Set up and train PyTorch model with inbuilt Lightning functions
+## Alternative 1: Set up and train PyTorch model with inbuilt Lightning functions
 class PP_LSTM_Lightning(L.LightningModule):
 
     def __init__(self):
         super().__init__()
 
         # Input and output parameters are X and Y coordinates
+        # Single layer for now, expand to check if it increases performance
         self.lstm=nn.LSTM(input_size=2, hidden_size=2, batch_first=True, dropout=0.0)
 
     def forward(self, input):
@@ -184,15 +189,71 @@ class PP_LSTM_Lightning(L.LightningModule):
 
         return loss
 
+## Alternative 2: Set up a stacked keras LSTM layer by layer
+modelKeras = Sequential()
+modelKeras.add(LSTM(128, input_shape=(trainingDataXY.shape[1], trainingDataXY.shape[2]), return_sequences='True'))
+modelKeras.add(LSTM(64, return_sequences='True'))
+modelKeras.add(LSTM(32, return_sequences='True'))
+modelKeras.add(LSTM(16))
+modelKeras.add(Dropout(0.2))
+# Add dropout layer after LSTM layers (but cf. Cheng et al., 2017 who propose per frame masks)
+# Check dense layer output & shape
+modelKeras.add(Dense(trainingDataXY_Next.shape[2], activation='relu'))
+modelKeras.compile(optimizer='adam', loss='mse')
+modelKeras.summary()
+# Fit keras model
+history = modelKeras.fit( trainingDataXY, trainingDataXY_Next, epochs=10, batch_size=64, validation_split=0.3, verbose=1 )
+# Plot training vs validation loss to check for overfitting
+plt.plot(history.history['loss'])
+plt.plot(history.history['val_loss'])
+plt.legend(['training loss', 'validation loss'])
+## Test Keras model
+testCoords = trainingDataXY[random.randint(0,len(trainingDataXY[:,0,0])),:,:]
+predCoords = modelKeras.predict(testCoords[:-1,:].reshape((1,len(testCoords[:,0])-1,2)))
+predCoords = scaler.inverse_transform( predCoords )
+testCoords = scaler.inverse_transform( testCoords )
+trueCoords = testCoords[-1,:] 
+plt.scatter(testCoords[:,0], testCoords[:,1])
+plt.scatter(trueCoords[0], trueCoords[1])
+plt.scatter(predCoords[0, 0], predCoords[0, 1])
+plt.legend(['base', 'true', 'predicted'])
+
+
+
 ## Set up and train the Lightning model
 modelLightning = PP_LSTM_Lightning()
 
-# Set up Lightning trainer with 6 epochs (3x params)
-trainerLightning = L.Trainer(max_epochs=6, log_every_n_steps=1, accelerator='gpu', devices='auto', strategy='auto')
-trainerLightning.fit(model=modelLightning, train_dataloaders=dataloader, ckpt_path=dirLSTM + 'lightning_logs/version_52/checkpoints/epoch=25-step=68382288.ckpt')
+# Set up Lightning trainer
+trainerLightning = L.Trainer(max_epochs=10, log_every_n_steps=1, accelerator='gpu', devices='auto', strategy='auto')
+trainerLightning.fit(model=modelLightning, train_dataloaders=dataloader)
 
-# Check model output with random input
-print( scaler.inverse_transform( modelLightning( torch.te nsor(scaler.transform( [[16.271627, 28.229027],
+# Check model output with random input once
+testCoords = torch.tensor( scaler.transform( [[16.271627, 28.229027],
+       [15.893902, 28.364021],
+       [15.524648, 28.632938],
+       [15.184661, 28.88007 ],
+       [14.943663, 28.832201],
+       [14.151804, 29.382717],
+       [14.068769, 29.366947],
+       [13.594865, 29.508871],
+       [13.239436, 29.688492],
+       [12.843507, 29.885359]] ).astype(np.float32) ).to(torch.device("mps"))
+
+predCoords = modelLightning(testCoords[:-1,:])
+predCoords = scaler.inverse_transform( predCoords.cpu().detach().reshape([1,-1]) )
+testCoordsCPU = scaler.inverse_transform( testCoords.cpu().detach() )
+plt.scatter(testCoordsCPU[:-1,0], testCoordsCPU[:-1,1])
+plt.scatter(predCoords[0, 0], predCoords[0, 1])
+plt.scatter(testCoordsCPU[-1, 0], testCoordsCPU[-1, 1])
+
+# Generate simulated tracks based on starting input frames
+# Moving window of f frames, predict next frame, move predicted frame into f-frame long window, repeat
+
+# How many minutes of tracks to generate (note training data was 30fps)
+lengthMin = 60
+
+# Starting coordinates of f frames
+startCoords = torch.tensor( scaler.transform( [[16.271627, 28.229027],
        [15.893902, 28.364021],
        [15.524648, 28.632938],
        [15.184661, 28.88007 ],
@@ -201,4 +262,20 @@ print( scaler.inverse_transform( modelLightning( torch.te nsor(scaler.transform(
        [14.068769, 29.366947],
        [13.594865, 29.508871],
        [13.239436, 29.688492],
-       [12.843507, 29.885359]] )) ) ).detach() )
+       [12.843507, 29.885359]] ).astype(np.float32) ).to(torch.device("mps"))
+
+simulatedTracks = np.zeros([30 * 60 * lengthMin, 2])
+movingWindow = startCoords
+
+# Main loop
+for frame in range(len(simulatedTracks[:,0])):
+    # Predict next coordinates from current moving window
+    predCoords = modelLightning(movingWindow)
+    # Log inverse transformed predicted coordinate for later plotting
+    simulatedTracks[frame, :] = scaler.inverse_transform( predCoords.cpu().detach().reshape([1,-1]) )
+    # Adjust moving window for next frame, roll elements backwards first, then replace last (rolled first) element with new predicted value
+    movingWindow = movingWindow.roll(-1,0)
+    movingWindow[-1,:] = predCoords
+
+# Plot generated tracks
+plt.scatter( simulatedTracks[:,0], simulatedTracks[:,1] )
