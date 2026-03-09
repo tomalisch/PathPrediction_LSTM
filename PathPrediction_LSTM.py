@@ -1,281 +1,193 @@
-## Introduction
-
-## Dependencies
-import os
-import math
-from typing import Any
-from lightning.pytorch.utilities.types import OptimizerLRScheduler
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from matplotlib.path import Path
-import matplotlib as mpl
-import seaborn as sns
 import random
-from PIL import Image
+import numpy as np
 import pandas as pd
-import scipy.io
-import datetime
-import hdf5storage
-from tqdm.auto import tqdm
-
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
 import torch
 import torch.nn as nn
-import torch.functional as F
-from torch.optim import Adam
-from torch.utils.data import TensorDataset, DataLoader
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from torch.utils.data import DataLoader, TensorDataset, Subset
 
-from keras.models import Sequential
-from keras.layers import LSTM, Dense, Dropout
+# Seeds
+seed = 42
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
 
-import lightning as L
-from lightning.pytorch.callbacks import RichProgressBar
-
-# Set past frame number from which to predict next coordinate
+# Config
 timesteps = 10
+batch_size = 64
+hidden_size = 64
+num_layers = 1
+epochs = 20
+lr = 1e-3
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Get and store current path and load training data (specific syntax depends on input raw)
-dirLSTM = os.getcwd()+'/'
-data = hdf5storage.loadmat(dirLSTM+'data.mat')['Centroidarray']
+# Load data
+data = pd.read_csv("TrackingData.csv")
+xy = data.iloc[:, :2].dropna().to_numpy(dtype=np.float32)
 
-# Shape training data array and drop NaNs
-trainingData = pd.DataFrame(data.transpose([2,0,1]).reshape(-1, 2))
-trainingData = trainingData.dropna()
+# Scale x and y to [0, 1]
+scaler = MinMaxScaler()
+xy_scaled = scaler.fit_transform(xy).astype(np.float32)
 
-# Scale coordinates independently to be between 0 and 1
-scaler = MinMaxScaler(feature_range=(0, 1))
-trainingData = pd.DataFrame( scaler.fit_transform(trainingData) )
+# Sliding window
+X, y = [], []
+for i in range(len(xy_scaled) - timesteps):
+    X.append(xy_scaled[i:i + timesteps])   # (timesteps, 2)
+    y.append(xy_scaled[i + timesteps])     # (2,)
 
-# Cull last values in array to allow reshaping according to timesteps set
-overflow = len(trainingData) % (timesteps+1)
-trainingData = trainingData.drop( trainingData.iloc[-overflow:,:].index, axis='index' )
+X = np.array(X, dtype=np.float32)
+y = np.array(y, dtype=np.float32)
 
-# Set up target training data (X, Y coordinates every ('timestep'+1)nth frame)
-trainingDataXY = np.array(trainingData).reshape((-1,timesteps+1,2))
-trainingDataXY_Next = trainingDataXY[:,timesteps,:].reshape(-1,1,2)
-# Remove target values from input training set 
-trainingDataXY = np.delete(trainingDataXY, timesteps, axis=1)
+X_tensor = torch.tensor(X)
+y_tensor = torch.tensor(y)
+dataset = TensorDataset(X_tensor, y_tensor)
 
-## Set up input and output tensors, and wrap in DataLoader function
-inputs = torch.tensor(trainingDataXY)
-targets = torch.tensor(trainingDataXY_Next)
-dataset = TensorDataset(inputs, targets)
-dataloader = DataLoader(dataset)
+# Training/validation split
+n_total = len(dataset)
+n_train = int(0.8 * n_total)
 
+train_indices = list(range(n_train))
+val_indices = list(range(n_train, n_total))
 
-## Manually set up recurrent neural net using Pytorchs
-class PP_LSTM_manual(L.LightningModule):
-    
-    # Create and initialize weights and biases tensors
-    def __init__(self):
-        # superInit from Lightning to inherit log functions
+train_ds = Subset(dataset, train_indices)
+val_ds = Subset(dataset, val_indices)
+
+train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+
+# LSTM model
+class XYLSTM(nn.Module):
+    def __init__(self, input_size=2, hidden_size=64, num_layers=1):
         super().__init__()
-        # Save hyperparameters in checkpoints
-        self.save_hyperparameters()
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True
+        )
+        self.fc = nn.Linear(hidden_size, 2)
 
-        # Set up tensors storing weights and bias means and stds
-        mean = torch.tensor(0.0)
-        std = torch.tensor(1.0)
+    def forward(self, x):
+        """ x: (batch, seq_len, 2)"""
+        out, _ = self.lstm(x)
+        last_hidden = out[:, -1, :]   # last timestep
+        pred = self.fc(last_hidden)   # (batch, 2)
+        return pred
 
-        # Create weights and bias parameters based on random initialization values (Gaussian)
-        # Forget gate parameters
-        self.wFG1 = nn.Parameter(  torch.normal(mean,std), requires_grad=True )
-        self.wFG2 = nn.Parameter(  torch.normal(mean,std), requires_grad=True )
-        self.bFG1 = nn.Parameter(  torch.tensor(0.0), requires_grad=True )
-        # Input gate params
-        self.wIG1 = nn.Parameter(  torch.normal(mean,std), requires_grad=True )
-        self.wIG2 = nn.Parameter(  torch.normal(mean,std), requires_grad=True )
-        self.bIG1 = nn.Parameter(  torch.tensor(0.0), requires_grad=True )
-        # New information params
-        self.wNI1 = nn.Parameter(  torch.normal(mean,std), requires_grad=True )
-        self.wNI2 = nn.Parameter(  torch.normal(mean,std), requires_grad=True )
-        self.bNI1 = nn.Parameter(  torch.tensor(0.0), requires_grad=True )
-        # Output gate params
-        self.wOG1 = nn.Parameter(  torch.normal(mean,std), requires_grad=True )
-        self.wOG2 = nn.Parameter(  torch.normal(mean,std), requires_grad=True )
-        self.bOG1 = nn.Parameter(  torch.tensor(0.0), requires_grad=True )
+model = XYLSTM(input_size=2, hidden_size=hidden_size, num_layers=num_layers).to(device)
+optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+criterion = nn.MSELoss()
 
+# Training loop
+train_losses = []
+val_losses = []
+best_val_loss = float("inf")
+best_state = None
 
-    # Create an lstm unit
-    def lstm_unit(self, inputValue, longMemory, shortMemory):
+for epoch in range(epochs):
+    model.train()
+    running_train = 0.0
 
-        # Forget gate remember percent w/ sigmoid activation function
-        longMemory_remember = torch.sigmoid( (shortMemory * self.wFG1) + (inputValue * self.wFG2) + self.bFG1 )
+    for xb, yb in train_loader:
+        xb, yb = xb.to(device), yb.to(device)
 
-        # Input gate (potential longerm memory remember percent & potential long term memory information) w/ sigmoid and tanh activation functions
-        potentialMemory_remember = torch.sigmoid( (shortMemory * self.wIG1) + (inputValue * self.wIG2) + self.bIG1 )
-        potentialMemory = torch.tanh( (shortMemory * self.wNI1) + (inputValue * self.wNI2) + self.bNI1 )
+        optimizer.zero_grad()
+        pred = model(xb)
+        loss = criterion(pred, yb)
+        loss.backward()
+        optimizer.step()
 
-        # Update old long term term memory with new information
-        longMemory_updated = ( (longMemory * longMemory_remember) + (potentialMemory_remember * potentialMemory) )
-        
-        # Ouput gate (potential shortterm memory remember percent & potential short term memory information) w/ sigmoid and tanh activation functions
-        shortMemory_remember = torch.sigmoid( (shortMemory * self.wOG1) + (inputValue * self.wOG2) + self.bOG1 )
-        shortMemory_updated = torch.tanh(longMemory_updated) * shortMemory_remember
+        running_train += loss.item() * xb.size(0)
 
-        # Return unit output (updated long term & short term memory)
-        return [longMemory_updated, shortMemory_updated]
+    train_loss = running_train / len(train_ds)
+    train_losses.append(train_loss)
 
+    model.eval()
+    running_val = 0.0
+    with torch.no_grad():
+        for xb, yb in val_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            pred = model(xb)
+            loss = criterion(pred, yb)
+            running_val += loss.item() * xb.size(0)
 
-    # Perform one step through entire (unrolled) LSTM
-    def forward(self, input):
+    val_loss = running_val / len(val_ds)
+    val_losses.append(val_loss)
 
-        # Initialize long and short term memory
-        longMemory = 0
-        shortMemory = 0
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
-        # For each frame, sequentially go through the LSTM unit 
-        for frame in range(len(input)):
-            longMemory, shortMemory = self.lstm_unit( input[frame], longMemory, shortMemory )
+    print(f"Epoch {epoch+1:02d} | train loss {train_loss:.6f} | val loss {val_loss:.6f}")
 
-        # Return updated short term memory output (output gate) of last time step 
-        return shortMemory
-    
+# Restore best model
+if best_state is not None:
+    model.load_state_dict(best_state)
 
-    # Function to configure Adam optimizer (e.g., if default LR is not optimal))
-    def configure_optimizers(self):
+# Plot training vs validation loss
+plt.figure()
+plt.plot(train_losses, label="train")
+plt.plot(val_losses, label="val")
+plt.xlabel("Epoch")
+plt.ylabel("MSE loss")
+plt.legend()
+plt.title("LSTM training and validation loss")
+plt.show()
 
-        # Keep Adam optimizer parameters default; change if learning insufficient
-        return Adam(self.parameters())
+# Quick one-step prediction example from validation set
+model.eval()
 
+val_example_idx = random.choice(val_indices)
+test_seq = X_tensor[val_example_idx:val_example_idx + 1].to(device)
+true_next = y[val_example_idx]
 
-    # Perform one step of model training using batch data and its indices; calculate and log loss
-    def training_step(self, batch, batchIDs):
+with torch.no_grad():
+    pred_next = model(test_seq).cpu().numpy()[0]
 
-        # Define input and targets based on batch data input
-        input_i, target_i = batch
-        # Forward through unrolled model, predicting outputs from inputs, weights, and biases
-        output_i = self.forward(input_i[0])
-        # Compute loss as mean squared difference between output and target
-        loss = torch.mean((output_i - target_i)**2)
-        # Use Lightning to log training loss
-        self.log('train_loss', loss)
+test_seq_unscaled = scaler.inverse_transform(X[val_example_idx])
+true_next_unscaled = scaler.inverse_transform(true_next.reshape(1, -1))[0]
+pred_next_unscaled = scaler.inverse_transform(pred_next.reshape(1, -1))[0]
 
-        return loss
+plt.figure()
+plt.scatter(test_seq_unscaled[:, 0], test_seq_unscaled[:, 1], label="history")
+plt.scatter(true_next_unscaled[0], true_next_unscaled[1], label="true next")
+plt.scatter(pred_next_unscaled[0], pred_next_unscaled[1], label="pred next")
+plt.legend()
+plt.title("One-step prediction on held-out validation window")
+plt.axis("equal")
+plt.show()
 
-## Alternative 1: Set up and train PyTorch model with inbuilt Lightning functions
-class PP_LSTM_Lightning(L.LightningModule):
+# Autoregressive rollout
+length_frames = 30 * 60  # 1 minute at 30 fps
 
-    def __init__(self):
-        super().__init__()
+# Seed from validation region
+seed_idx = val_indices[0]
+seed = X[seed_idx].copy()
+moving_window = torch.tensor(seed, dtype=torch.float32, device=device)
 
-        # Input and output parameters are X and Y coordinates
-        # Single layer for now, expand to check if it increases performance
-        self.lstm=nn.LSTM(input_size=2, hidden_size=2, batch_first=True, dropout=0.0)
+simulated = []
 
-    def forward(self, input):
-        lstm_out, temp = self.lstm(input)
-  
-        # Prediction is the last unrolled lstm unit output of the model (short term memory value)
-        prediction = lstm_out[-1]
-        return prediction
-    
-    def configure_optimizers(self, lr=0.001):
+model.eval()
+with torch.no_grad():
+    for _ in range(length_frames):
+        pred = model(moving_window.unsqueeze(0)).cpu().numpy()[0]
+        simulated.append(pred)
 
-        return Adam(self.parameters(), lr=lr)
-    
-    # Perform one step of model training using batch data and its indices; calculate and log loss
-    def training_step(self, batch, batchIDs):
+        # Slide window and append prediction
+        moving_window = torch.roll(moving_window, shifts=-1, dims=0)
+        moving_window[-1] = torch.tensor(pred, dtype=torch.float32, device=device)
 
-        # Define input and targets based on batch data input
-        input_i, target_i = batch
-        # Forward through unrolled model, predicting outputs from inputs, weights, and biases
-        output_i = self.forward(input_i[0])
-        # Compute loss as mean squared difference between output and target
-        loss = torch.mean((output_i - target_i)**2)
-        # Use Lightning to log training loss
-        self.log('train_loss', loss)
+simulated = np.array(simulated, dtype=np.float32)
+simulated_unscaled = scaler.inverse_transform(simulated)
+seed_unscaled = scaler.inverse_transform(seed)
 
-        return loss
-
-## Alternative 2: Set up a stacked keras LSTM layer by layer
-modelKeras = Sequential()
-modelKeras.add(LSTM(128, input_shape=(trainingDataXY.shape[1], trainingDataXY.shape[2]), return_sequences='True'))
-modelKeras.add(LSTM(64, return_sequences='True'))
-modelKeras.add(LSTM(32, return_sequences='True'))
-modelKeras.add(LSTM(16))
-modelKeras.add(Dropout(0.2))
-# Add dropout layer after LSTM layers (but cf. Cheng et al., 2017 who propose per frame masks)
-# Check dense layer output & shape
-modelKeras.add(Dense(trainingDataXY_Next.shape[2], activation='relu'))
-modelKeras.compile(optimizer='adam', loss='mse')
-modelKeras.summary()
-# Fit keras model
-history = modelKeras.fit( trainingDataXY, trainingDataXY_Next, epochs=10, batch_size=64, validation_split=0.3, verbose=1 )
-# Plot training vs validation loss to check for overfitting
-plt.plot(history.history['loss'])
-plt.plot(history.history['val_loss'])
-plt.legend(['training loss', 'validation loss'])
-## Test Keras model
-testCoords = trainingDataXY[random.randint(0,len(trainingDataXY[:,0,0])),:,:]
-predCoords = modelKeras.predict(testCoords[:-1,:].reshape((1,len(testCoords[:,0])-1,2)))
-predCoords = scaler.inverse_transform( predCoords )
-testCoords = scaler.inverse_transform( testCoords )
-trueCoords = testCoords[-1,:] 
-plt.scatter(testCoords[:,0], testCoords[:,1])
-plt.scatter(trueCoords[0], trueCoords[1])
-plt.scatter(predCoords[0, 0], predCoords[0, 1])
-plt.legend(['base', 'true', 'predicted'])
-
-
-
-## Set up and train the Lightning model
-modelLightning = PP_LSTM_Lightning()
-
-# Set up Lightning trainer
-trainerLightning = L.Trainer(max_epochs=10, log_every_n_steps=1, accelerator='gpu', devices='auto', strategy='auto')
-trainerLightning.fit(model=modelLightning, train_dataloaders=dataloader)
-
-# Check model output with random input once
-testCoords = torch.tensor( scaler.transform( [[16.271627, 28.229027],
-       [15.893902, 28.364021],
-       [15.524648, 28.632938],
-       [15.184661, 28.88007 ],
-       [14.943663, 28.832201],
-       [14.151804, 29.382717],
-       [14.068769, 29.366947],
-       [13.594865, 29.508871],
-       [13.239436, 29.688492],
-       [12.843507, 29.885359]] ).astype(np.float32) ).to(torch.device("mps"))
-
-predCoords = modelLightning(testCoords[:-1,:])
-predCoords = scaler.inverse_transform( predCoords.cpu().detach().reshape([1,-1]) )
-testCoordsCPU = scaler.inverse_transform( testCoords.cpu().detach() )
-plt.scatter(testCoordsCPU[:-1,0], testCoordsCPU[:-1,1])
-plt.scatter(predCoords[0, 0], predCoords[0, 1])
-plt.scatter(testCoordsCPU[-1, 0], testCoordsCPU[-1, 1])
-
-# Generate simulated tracks based on starting input frames
-# Moving window of f frames, predict next frame, move predicted frame into f-frame long window, repeat
-
-# How many minutes of tracks to generate (note training data was 30fps)
-lengthMin = 60
-
-# Starting coordinates of f frames
-startCoords = torch.tensor( scaler.transform( [[16.271627, 28.229027],
-       [15.893902, 28.364021],
-       [15.524648, 28.632938],
-       [15.184661, 28.88007 ],
-       [14.943663, 28.832201], 
-       [14.151804, 29.382717],
-       [14.068769, 29.366947],
-       [13.594865, 29.508871],
-       [13.239436, 29.688492],
-       [12.843507, 29.885359]] ).astype(np.float32) ).to(torch.device("mps"))
-
-simulatedTracks = np.zeros([30 * 60 * lengthMin, 2])
-movingWindow = startCoords
-
-# Main loop
-for frame in range(len(simulatedTracks[:,0])):
-    # Predict next coordinates from current moving window
-    predCoords = modelLightning(movingWindow)
-    # Log inverse transformed predicted coordinate for later plotting
-    simulatedTracks[frame, :] = scaler.inverse_transform( predCoords.cpu().detach().reshape([1,-1]) )
-    # Adjust moving window for next frame, roll elements backwards first, then replace last (rolled first) element with new predicted value
-    movingWindow = movingWindow.roll(-1,0)
-    movingWindow[-1,:] = predCoords
-
-# Plot generated tracks
-plt.scatter( simulatedTracks[:,0], simulatedTracks[:,1] )
+plt.figure(figsize=(6, 6))
+plt.plot(seed_unscaled[:, 0], seed_unscaled[:, 1], label="seed history", linewidth=2)
+plt.plot(simulated_unscaled[:, 0], simulated_unscaled[:, 1], label="simulated rollout", linewidth=1)
+plt.xlabel("X")
+plt.ylabel("Y")
+plt.title("Autoregressively simulated fly path")
+plt.legend()
+plt.axis("equal")
+plt.show()
