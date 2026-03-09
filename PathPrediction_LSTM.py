@@ -7,7 +7,7 @@ from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset, Subset
+from torch.utils.data import DataLoader, Dataset
 
 # Seeds & CUDA
 seed_value = 42
@@ -15,16 +15,27 @@ random.seed(seed_value)
 np.random.seed(seed_value)
 torch.manual_seed(seed_value)
 if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(seed_value)
+    device = torch.device("cuda")
+    print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+else:
+    device = torch.device("cpu")
+    print("CUDA not available, using CPU")
+    print(f"torch.version.cuda = {torch.version.cuda}")
 
 # Config
-timesteps = 10
-batch_size = 64
-hidden_size = 64
-num_layers = 1
-epochs = 20
+interpolate_missing_data = False
+max_nan_fraction = 0.10
+timesteps = 60
+batch_size = 512
+hidden_size = 512
+num_layers = 2
+epochs = 100
 lr = 1e-3
-generate_steps = 15 * 60  # generate N steps for visualization
+rollout_steps = 5
+huber_delta = 0.01
+train_samples_per_epoch = 300_000
+val_samples_per_epoch = 20_000
+generate_steps = 30 * 60  # generate N steps for visualization
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 repo_root = Path.cwd()
@@ -32,70 +43,159 @@ repo_root = Path.cwd()
 print(f"Using device: {device}")
 print(f"Repository root: {repo_root}")
 
-# Load data
-data_path = repo_root / "TrackingData.csv"
-if not data_path.exists():
-    raise FileNotFoundError(f"Could not find input file: {data_path}")
+# Load wide multi-fly data
+data = pd.read_csv("TrackingData.csv", dtype=np.float32)
 
-print("Loading data...")
-data = pd.read_csv(data_path)
-xy = data.iloc[:, :2].dropna().to_numpy(dtype=np.float32)
+# Drop the first column ("frame"), keep only Fly_i_X / Fly_i_Y columns
+coords = data.iloc[:, 1:].to_numpy(dtype=np.float32)
 
-if xy.shape[0] <= timesteps:
-    raise ValueError(
-        f"Not enough frames ({xy.shape[0]}) for timesteps={timesteps}. "
-        f"You need more than {timesteps} rows."
-    )
+n_frames, n_coord_cols = coords.shape
+if n_coord_cols % 2 != 0:
+    raise ValueError(f"Expected an even number of coordinate columns, got {n_coord_cols}")
 
-print(f"Loaded {xy.shape[0]} frames with {xy.shape[1]} features (X, Y).")
+n_flies = n_coord_cols // 2
+print(f"Loaded {n_frames} frames for {n_flies} flies")
 
-# Scale x and y to [0, 1]
+# Reshape from (frames, 2*flies) -> (flies, frames, 2)
+fly_data = coords.reshape(n_frames, n_flies, 2).transpose(1, 0, 2)
+
+# Allow partial missingness per fly, but require enough valid data overall
+valid_frame_mask = np.isfinite(fly_data).all(axis=2)   # shape: (n_flies, n_frames)
+valid_fraction_per_fly = valid_frame_mask.mean(axis=1)
+
+print("Valid-frame fraction per fly:")
+print(f"  min    = {valid_fraction_per_fly.min():.4f}")
+print(f"  mean   = {valid_fraction_per_fly.mean():.4f}")
+print(f"  median = {np.median(valid_fraction_per_fly):.4f}")
+print(f"  max    = {valid_fraction_per_fly.max():.4f}")
+
+# Keep flies with enough usable data
+keep_mask = valid_fraction_per_fly >= (1.0 - max_nan_fraction)
+fly_data = fly_data[keep_mask]
+valid_frame_mask = valid_frame_mask[keep_mask]
+
+n_valid_flies = fly_data.shape[0]
+print(f"Keeping {n_valid_flies} flies with >= {(1.0 - max_nan_fraction):.0%} valid frames")
+
+if n_valid_flies < 2:
+    raise ValueError("Need at least 2 flies after filtering")
+
+# Optional interpolation
+if interpolate_missing_data:
+    print("Interpolating missing coordinates within each fly...")
+    for i in tqdm(range(n_valid_flies), desc="Interpolating flies", dynamic_ncols=True):
+        df_xy = pd.DataFrame(fly_data[i], columns=["x", "y"])
+        df_xy = df_xy.interpolate(method="linear", limit_direction="both")
+        fly_data[i] = df_xy.to_numpy(dtype=np.float32)
+
+    # After interpolation, recompute validity mask
+    valid_frame_mask = np.isfinite(fly_data).all(axis=2)
+
+# Fit one shared scaler on all finite coordinates
+flat = fly_data.reshape(-1, 2)
+finite_rows = np.isfinite(flat).all(axis=1)
+
 scaler = MinMaxScaler()
-xy_scaled = scaler.fit_transform(xy).astype(np.float32)
+scaler.fit(flat[finite_rows])
 
-# Sliding window
-print("Building sliding windows...")
-X, y = [], []
-for i in tqdm(range(len(xy_scaled) - timesteps), desc="Sliding windows", dynamic_ncols=True):
-    X.append(xy_scaled[i:i + timesteps])   # shape: (timesteps, 2)
-    y.append(xy_scaled[i + timesteps])     # shape: (2,)
+# Transform only finite rows; preserve NaNs if interpolation is off
+flat_scaled = flat.copy()
+flat_scaled[finite_rows] = scaler.transform(flat[finite_rows]).astype(np.float32)
 
-X = np.array(X, dtype=np.float32)
-y = np.array(y, dtype=np.float32)
+fly_data_scaled = flat_scaled.reshape(fly_data.shape).astype(np.float32)
 
-X_tensor = torch.tensor(X)
-y_tensor = torch.tensor(y)
-dataset = TensorDataset(X_tensor, y_tensor)
+# Split by fly
+fly_order = np.random.permutation(n_valid_flies)
+n_train_flies = int(0.8 * n_valid_flies)
 
-print(f"Constructed {len(dataset)} training examples.")
+train_fly_indices = fly_order[:n_train_flies]
+val_fly_indices = fly_order[n_train_flies:]
 
-# Training/validation split
-n_total = len(dataset)
-n_train = int(0.8 * n_total)
-n_val = n_total - n_train
+print(f"Train flies: {len(train_fly_indices)} | Val flies: {len(val_fly_indices)}")
 
-train_indices = list(range(n_train))
-val_indices = list(range(n_train, n_total))
+class RandomWindowDataset(Dataset):
+    def __init__(self, fly_data, valid_frame_mask, fly_indices, timesteps, rollout_steps, samples_per_epoch):
+        self.fly_data = fly_data
+        self.valid_frame_mask = valid_frame_mask
+        self.timesteps = timesteps
+        self.rollout_steps = rollout_steps
+        self.samples_per_epoch = samples_per_epoch
+        self.required_len = timesteps + rollout_steps
+        self.n_frames = fly_data.shape[1]
 
-train_ds = Subset(dataset, train_indices)
-val_ds = Subset(dataset, val_indices)
+        if self.n_frames < self.required_len:
+            raise ValueError(
+                f"Not enough frames ({self.n_frames}) for timesteps={timesteps} "
+                f"and rollout_steps={rollout_steps}"
+            )
 
-pin_memory = torch.cuda.is_available()
+        # For each fly, precompute all valid start positions where the full
+        # input window + target rollout contain no missing data.
+        self.fly_indices = []
+        self.valid_starts_per_fly = []
 
-train_loader = DataLoader(
-    train_ds,
-    batch_size=batch_size,
-    shuffle=True,
-    pin_memory=pin_memory
+        for fly_idx in fly_indices:
+            mask = self.valid_frame_mask[fly_idx].astype(np.int32)
+
+            # Convolution counts how many valid frames are in each candidate window
+            valid_counts = np.convolve(
+                mask,
+                np.ones(self.required_len, dtype=np.int32),
+                mode="valid"
+            )
+            valid_starts = np.flatnonzero(valid_counts == self.required_len)
+
+            if len(valid_starts) > 0:
+                self.fly_indices.append(int(fly_idx))
+                self.valid_starts_per_fly.append(valid_starts)
+
+        if len(self.fly_indices) == 0:
+            raise ValueError("No flies have any fully valid windows for the current timesteps/rollout_steps")
+
+        print(
+            f"Dataset built from {len(self.fly_indices)} flies "
+            f"with at least one fully valid window"
+        )
+
+    def __len__(self):
+        return self.samples_per_epoch
+
+    def __getitem__(self, idx):
+        # Sample a fly, then sample one of its valid windows
+        fly_slot = np.random.randint(0, len(self.fly_indices))
+        fly_idx = self.fly_indices[fly_slot]
+        start = int(np.random.choice(self.valid_starts_per_fly[fly_slot]))
+
+        x = self.fly_data[fly_idx, start:start + self.timesteps]   # (timesteps, 2)
+
+        # Target = next K true positions
+        future_positions = self.fly_data[
+            fly_idx,
+            start + self.timesteps : start + self.timesteps + self.rollout_steps
+        ]  # (rollout_steps, 2)
+
+        return torch.from_numpy(x), torch.from_numpy(future_positions)
+
+train_ds = RandomWindowDataset(
+    fly_data=fly_data_scaled,
+    valid_frame_mask=valid_frame_mask,
+    fly_indices=train_fly_indices,
+    timesteps=timesteps,
+    rollout_steps=rollout_steps,
+    samples_per_epoch=train_samples_per_epoch,
 )
-val_loader = DataLoader(
-    val_ds,
-    batch_size=batch_size,
-    shuffle=False,
-    pin_memory=pin_memory
+
+val_ds = RandomWindowDataset(
+    fly_data=fly_data_scaled,
+    valid_frame_mask=valid_frame_mask,
+    fly_indices=val_fly_indices,
+    timesteps=timesteps,
+    rollout_steps=rollout_steps,
+    samples_per_epoch=val_samples_per_epoch,
 )
 
-print(f"Train samples: {len(train_ds)} | Validation samples: {len(val_ds)}")
+train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=False)
+val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
 
 # LSTM model
 class XYLSTM(nn.Module):
@@ -118,7 +218,7 @@ class XYLSTM(nn.Module):
 
 model = XYLSTM(input_size=2, hidden_size=hidden_size, num_layers=num_layers).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-criterion = nn.MSELoss()
+criterion = nn.HuberLoss(delta=huber_delta)
 
 
 # Training loop
@@ -146,8 +246,25 @@ for epoch in epoch_bar:
         yb = yb.to(device, non_blocking=True)
 
         optimizer.zero_grad()
-        pred = model(xb)
-        loss = criterion(pred, yb)
+        # Multi-step autoregressive rollout loss
+        current_window = xb.clone()
+        loss = 0.0
+
+        for k in range(rollout_steps):
+            pred_delta = model(current_window)                      # (batch, 2)
+            pred_pos = current_window[:, -1, :] + pred_delta       # reconstructed next position
+            true_pos = yb[:, k, :]                                  # true next position at rollout step k
+
+            loss = loss + criterion(pred_pos, true_pos)
+
+            # Roll window forward using the predicted position
+            current_window = torch.cat(
+                [current_window[:, 1:, :], pred_pos.unsqueeze(1)],
+                dim=1
+            )
+
+        loss = loss / rollout_steps
+
         loss.backward()
         optimizer.step()
 
@@ -157,7 +274,7 @@ for epoch in epoch_bar:
     train_loss = running_train / len(train_ds)
     train_losses.append(train_loss)
 
-    # ---- Validation ----
+    # Validation
     model.eval()
     running_val = 0.0
 
@@ -172,8 +289,22 @@ for epoch in epoch_bar:
             xb = xb.to(device, non_blocking=True)
             yb = yb.to(device, non_blocking=True)
 
-            pred = model(xb)
-            loss = criterion(pred, yb)
+            current_window = xb.clone()
+            loss = 0.0
+
+            for k in range(rollout_steps):
+                pred_delta = model(current_window)                      # (batch, 2)
+                pred_pos = current_window[:, -1, :] + pred_delta
+                true_pos = yb[:, k, :]
+
+                loss = loss + criterion(pred_pos, true_pos)
+
+                current_window = torch.cat(
+                    [current_window[:, 1:, :], pred_pos.unsqueeze(1)],
+                    dim=1
+                )
+
+            loss = loss / rollout_steps
             running_val += loss.item() * xb.size(0)
             val_bar.set_postfix(loss=f"{loss.item():.6f}")
 
@@ -201,28 +332,35 @@ plt.figure(figsize=(8, 5))
 plt.plot(train_losses, label="train")
 plt.plot(val_losses, label="val")
 plt.xlabel("Epoch")
-plt.ylabel("MSE loss")
+plt.ylabel("Huber rollout loss")
 plt.legend()
-plt.title("LSTM training and validation loss")
+plt.title(f"LSTM training and validation loss (K={rollout_steps} rollout)")
 plt.tight_layout()
 plt.savefig(loss_plot_path, dpi=300)
 plt.close()
 print(f"Saved loss plot to: {loss_plot_path}")
 
-# Quick one-step prediction example from validation set
-print("Generating one-step validation example...")
+# Quick one-step prediction example from a held-out validation fly
 model.eval()
 
-val_example_idx = random.choice(val_indices)
-test_seq = X_tensor[val_example_idx:val_example_idx + 1].to(device)
-true_next = y[val_example_idx]
+fly_slot = np.random.randint(0, len(val_ds.fly_indices))
+example_fly = val_ds.fly_indices[fly_slot]
+example_start = int(np.random.choice(val_ds.valid_starts_per_fly[fly_slot]))
+
+test_seq_scaled = fly_data_scaled[example_fly, example_start:example_start + timesteps]
+last_input_scaled = test_seq_scaled[-1]
+true_next_scaled = fly_data_scaled[example_fly, example_start + timesteps]
+
+test_seq = torch.tensor(test_seq_scaled[None, ...], dtype=torch.float32, device=device)
 
 with torch.no_grad():
-    pred_next = model(test_seq).cpu().numpy()[0]
+    pred_delta_scaled = model(test_seq).cpu().numpy()[0]
 
-test_seq_unscaled = scaler.inverse_transform(X[val_example_idx])
-true_next_unscaled = scaler.inverse_transform(true_next.reshape(1, -1))[0]
-pred_next_unscaled = scaler.inverse_transform(pred_next.reshape(1, -1))[0]
+pred_next_scaled = last_input_scaled + pred_delta_scaled
+
+test_seq_unscaled = scaler.inverse_transform(test_seq_scaled)
+true_next_unscaled = scaler.inverse_transform(true_next_scaled.reshape(1, -1))[0]
+pred_next_unscaled = scaler.inverse_transform(pred_next_scaled.reshape(1, -1))[0]
 
 one_step_plot_path = repo_root / "one_step_validation_example.png"
 plt.figure(figsize=(6, 6))
@@ -240,10 +378,12 @@ print(f"Saved one-step validation plot to: {one_step_plot_path}")
 # Autoregressive rollout
 print("Generating autoregressive rollout...")
 
-# Seed from validation region
-seed_idx = val_indices[0]
-seed_window = X[seed_idx].copy()  # shape: (timesteps, 2)
-moving_window = torch.tensor(seed_window, dtype=torch.float32, device=device)
+# Seed rollout from a held-out validation fly
+seed_fly = val_ds.fly_indices[0]
+seed_start = int(val_ds.valid_starts_per_fly[0][0])
+
+seed = fly_data_scaled[seed_fly, seed_start:seed_start + timesteps].copy()
+moving_window = torch.tensor(seed, dtype=torch.float32, device=device)
 
 simulated = []
 
@@ -251,16 +391,20 @@ model.eval()
 with torch.no_grad():
     rollout_bar = tqdm(range(generate_steps), desc="Rollout", dynamic_ncols=True)
     for _ in rollout_bar:
-        pred = model(moving_window.unsqueeze(0)).cpu().numpy()[0]
-        simulated.append(pred)
+        pred_delta = model(moving_window.unsqueeze(0)).cpu().numpy()[0]
 
-        # Slide window and append prediction
+        last_pos = moving_window[-1].detach().cpu().numpy()
+        next_pos = last_pos + pred_delta
+
+        simulated.append(next_pos)
+
+        # Slide window and append reconstructed next position
         moving_window = torch.roll(moving_window, shifts=-1, dims=0)
-        moving_window[-1] = torch.tensor(pred, dtype=torch.float32, device=device)
+        moving_window[-1] = torch.tensor(next_pos, dtype=torch.float32, device=device)
 
 simulated = np.array(simulated, dtype=np.float32)
 simulated_unscaled = scaler.inverse_transform(simulated)
-seed_unscaled = scaler.inverse_transform(seed_window)
+seed_unscaled = scaler.inverse_transform(seed)
 
 # Save simulated coordinates as CSV in repo root
 sim_csv_path = repo_root / "simulated_fly_path.csv"
